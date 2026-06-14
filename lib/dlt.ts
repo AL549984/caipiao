@@ -34,6 +34,24 @@ export function generateNumbers(seedText: string): DltNumbers {
   return { front: pick(5, 35, r), back: pick(2, 12, r) };
 }
 
+function numberKey(numbers: DltNumbers) {
+  return `${numbers.front.join("-")}+${numbers.back.join("-")}`;
+}
+
+function generateUniqueNumbers(seed: string, used: Set<string>, label: string) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const numbers = generateNumbers(`${seed}-${label}-${attempt}`);
+    const key = numberKey(numbers);
+    if (!used.has(key)) {
+      used.add(key);
+      return numbers;
+    }
+  }
+  const fallback = generateNumbers(`${seed}-${label}-${Date.now()}`);
+  used.add(numberKey(fallback));
+  return fallback;
+}
+
 export function lineCost(multiplier: number, addOn: boolean) {
   return multiplier * (addOn ? 3 : 2);
 }
@@ -45,18 +63,34 @@ export function nextDrawNo(date = new Date()) {
   return `${y}${String(Math.ceil(day / 2)).padStart(3, "0")}`;
 }
 
+function chooseCapFirstSplits(budget: number) {
+  const preferred = [10, 5, 5, 13];
+  const splits: number[] = [];
+  let remaining = budget;
+  for (const multiplier of preferred) {
+    const cost = lineCost(multiplier, true);
+    if (remaining >= cost) {
+      splits.push(multiplier);
+      remaining -= cost;
+    }
+  }
+  if (!splits.length && remaining >= 3) splits.push(Math.floor(remaining / 3));
+  return splits.filter((m) => m > 0);
+}
+
 export function generatePlan(input?: { budget?: number; drawNo?: string; strategy?: "cap-first" | "balanced"; seed?: string }): Plan {
   const budget = Math.max(20, Math.min(999, Math.floor(input?.budget ?? 100)));
   const drawNo = input?.drawNo || nextDrawNo();
   const strategy = input?.strategy || "balanced";
   const seed = input?.seed || `${drawNo}-${new Date().toISOString().slice(0, 10)}`;
-  const main = generateNumbers(`${seed}-main-A`);
   const lines: DltLine[] = [];
+  const used = new Set<string>();
 
   const push = (partial: Omit<DltLine, "cost">) => lines.push({ ...partial, cost: lineCost(partial.multiplier, partial.addOn) });
 
   if (strategy === "cap-first") {
-    const splits = [10, 5, 5, 13];
+    const main = generateUniqueNumbers(seed, used, "cap-main");
+    const splits = chooseCapFirstSplits(budget);
     splits.forEach((m, i) => push({
       id: `main-${i + 1}`,
       label: `同号主票 ${i + 1}`,
@@ -64,49 +98,33 @@ export function generatePlan(input?: { budget?: number; drawNo?: string; strateg
       ...main,
       multiplier: m,
       addOn: true,
-      rationale: i < 3 ? "满足三张票同号追加的主策略，优先把一次中大奖时的倍数做高。" : "预算内继续增加同号倍数；注意可能超过封顶有效价值。",
+      rationale: i === 0 ? "同号多倍策略：优先把预算集中到一组号码；只在明确选择冲封顶时使用。" : "同号拆票记录：便于实际出票和后续复盘，不代表提升中奖概率。",
     }));
   } else {
-    [10, 5, 5].forEach((m, i) => push({
-      id: `main-${i + 1}`,
-      label: `同号主票 ${i + 1}`,
-      role: "main",
-      ...main,
-      multiplier: m,
-      addOn: true,
-      rationale: "20 倍追加同号用于接近一等奖封顶思路；拆成 10+5+5 便于实际下单记录。",
-    }));
-  }
-
-  let remaining = budget - lines.reduce((s, l) => s + l.cost, 0);
-  let idx = 1;
-  if (remaining > 0 && strategy === "balanced") {
-    while (remaining >= 3) {
-      const addOn = remaining >= 3 && idx <= 6;
+    // Balanced mode must diversify numbers. Each displayed row is a different
+    // single-line ticket, instead of repeating the same main number three times.
+    let remaining = budget;
+    let idx = 1;
+    while (remaining >= 2) {
+      const addOn = remaining >= 3 && idx <= Math.ceil(budget / 6);
       const cost = addOn ? 3 : 2;
       if (remaining < cost) break;
+      const role: DltLine["role"] = idx <= 3 ? "main" : "coverage";
       push({
-        id: `coverage-${idx}`,
-        label: `覆盖号 ${idx}`,
-        role: "coverage",
-        ...generateNumbers(`${seed}-coverage-${idx}`),
+        id: `${role}-${idx}`,
+        label: role === "main" ? `分散主票 ${idx}` : `覆盖号 ${idx - 3}`,
+        role,
+        ...generateUniqueNumbers(seed, used, `balanced-${idx}`),
         multiplier: 1,
         addOn,
-        rationale: addOn ? "追加覆盖号：在剩余预算内保留追加资格。" : "基础覆盖号：不宣称提升概率，只扩大不同号码覆盖面。",
+        rationale: role === "main"
+          ? "均衡策略：主票之间强制使用不同号码，避免重复占用预算。"
+          : addOn
+            ? "追加覆盖号：在剩余预算内保留追加资格。"
+            : "基础覆盖号：不宣称提升概率，只扩大不同号码覆盖面。",
       });
       remaining -= cost;
       idx += 1;
-    }
-    if (remaining >= 2) {
-      push({
-        id: `coverage-${idx}`,
-        label: `覆盖号 ${idx}`,
-        role: "coverage",
-        ...generateNumbers(`${seed}-coverage-${idx}`),
-        multiplier: 1,
-        addOn: false,
-        rationale: "用最后 2 元补一注基础单式，避免无效闲置预算。",
-      });
     }
   }
 
@@ -122,7 +140,7 @@ export function generatePlan(input?: { budget?: number; drawNo?: string; strateg
     assumptions: [
       "本工具只做预算分配、记录和复盘，不预测中奖号码。",
       "大乐透每注基础 2 元，追加每注加 1 元；多倍按单注成本乘倍数计算。",
-      "文档中的 13 注追加 + 7 注不追加会超过 40 元剩余预算，MVP 已按预算重新约束。",
+      "均衡策略会强制不同票面号码，避免多行推荐重复占用预算。",
     ],
     riskNotes: [
       "号码组合不代表更高中奖概率；热号、冷号、生日号与机选在数学上没有确定优势。",
