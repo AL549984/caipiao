@@ -1,5 +1,10 @@
-import { Pool } from "pg";
+import { Pool, types } from "pg";
 import { DrawResult, Ticket } from "./types";
+
+// Keep Postgres DATE values as raw YYYY-MM-DD strings.
+// pg's default parser returns a JS Date at local midnight; converting that
+// with toISOString() shifts China-time dates to the previous UTC day.
+types.setTypeParser(1082, (value) => value);
 
 let pool: Pool | null = null;
 
