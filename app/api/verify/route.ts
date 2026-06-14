@@ -3,7 +3,11 @@ import { checkTicket } from "@/lib/dlt";
 import { getDraws, getTickets } from "@/lib/store";
 
 export async function POST(req: Request) {
-  const body = await req.json();
+  const body = await req.json().catch(() => null);
+  if (!body || (!body.ticketId && !body.ticket)) {
+    return NextResponse.json({ error: "ticketId or ticket is required" }, { status: 400 });
+  }
+
   const tickets = await getTickets();
   const draws = await getDraws();
   const ticket = tickets.find((t) => t.id === body.ticketId) || body.ticket;

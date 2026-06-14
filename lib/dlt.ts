@@ -56,11 +56,19 @@ export function lineCost(multiplier: number, addOn: boolean) {
   return multiplier * (addOn ? 3 : 2);
 }
 
-export function nextDrawNo(date = new Date()) {
-  const y = date.getFullYear();
-  const start = new Date(y, 0, 1);
+export function nextDrawNo(date = new Date(), latestDrawNo?: string) {
+  if (latestDrawNo && /^\d{5}$/.test(latestDrawNo)) {
+    return String(Number(latestDrawNo) + 1).padStart(5, "0");
+  }
+  const y = String(date.getFullYear()).slice(-2);
+  const start = new Date(date.getFullYear(), 0, 1);
   const day = Math.floor((date.getTime() - start.getTime()) / 86400000) + 1;
-  return `${y}${String(Math.ceil(day / 2)).padStart(3, "0")}`;
+  // 大乐透通常每周一、三、六开奖，全年约 150 期；没有官方最新期号时只做保守估算。
+  return `${y}${String(Math.ceil(day * 3 / 7)).padStart(3, "0")}`;
+}
+
+export function nextDrawNoFromLatest(latestDrawNo?: string) {
+  return nextDrawNo(new Date(), latestDrawNo);
 }
 
 function chooseCapFirstSplits(budget: number) {

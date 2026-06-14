@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { DrawResult, Plan, PrizeCheck, Ticket } from "@/lib/types";
 import { formatNumbers } from "@/lib/dlt";
 
@@ -38,6 +38,34 @@ function NumberStrip({ front, back }: { front: number[]; back: number[] }) {
   );
 }
 
+const LOCAL_TICKETS_KEY = "dlt-decision-tracker:tickets";
+
+function mergeTickets(primary: Ticket[], secondary: Ticket[]) {
+  const seen = new Set<string>();
+  return [...primary, ...secondary].filter((ticket) => {
+    if (seen.has(ticket.id)) return false;
+    seen.add(ticket.id);
+    return true;
+  }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+function buildClientTicket(plan: Plan): Ticket {
+  return {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    drawNo: plan.drawNo,
+    budget: plan.budget,
+    totalCost: plan.totalCost,
+    lines: plan.lines,
+    status: "planned",
+    note: "由工作台生成，保存在当前浏览器。",
+  };
+}
+
+function saveLocalTickets(tickets: Ticket[]) {
+  window.localStorage.setItem(LOCAL_TICKETS_KEY, JSON.stringify(tickets));
+}
+
 export default function Workspace({ initialDraws, initialTickets, initialPlan }: Props) {
   const [active, setActive] = useState<TabId>("plan");
   const [plan, setPlan] = useState(initialPlan);
@@ -49,31 +77,56 @@ export default function Workspace({ initialDraws, initialTickets, initialPlan }:
 
   const kpi = useMemo(() => {
     const spent = tickets.reduce((s, t) => s + t.totalCost, 0);
+    const apiDraws = initialDraws.filter((draw) => draw.source === "api").length;
     return {
       tickets: tickets.length,
       spent,
       checked: tickets.filter((t) => t.status === "checked").length,
-      mockDraws: initialDraws.length,
+      drawSource: apiDraws === initialDraws.length ? `${initialDraws.length} 期官方` : `${apiDraws}/${initialDraws.length} 期官方`,
     };
-  }, [tickets, initialDraws.length]);
+  }, [tickets, initialDraws]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(LOCAL_TICKETS_KEY);
+      if (!raw) return;
+      const localTickets = JSON.parse(raw) as Ticket[];
+      if (Array.isArray(localTickets) && localTickets.length) {
+        setTickets((current) => mergeTickets(current, localTickets));
+      }
+    } catch (error) {
+      console.warn("Failed to load local tickets", error);
+    }
+  }, []);
 
   const regenerate = () => startTransition(async () => {
     const res = await fetch("/api/plans/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ budget, strategy, seed: `${Date.now()}` }),
+      body: JSON.stringify({ budget, strategy, drawNo: plan.drawNo, seed: `${Date.now()}` }),
     });
     setPlan(await res.json());
   });
 
   const savePlan = () => startTransition(async () => {
-    const res = await fetch("/api/tickets", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...plan, status: "planned", note: "由工作台生成，待线下确认是否已购。" }),
-    });
-    const ticket = await res.json();
-    setTickets([ticket, ...tickets]);
+    let ticket = buildClientTicket(plan);
+    try {
+      const res = await fetch("/api/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...plan, status: "planned", note: "由工作台生成，待线下确认是否已购。" }),
+      });
+      if (res.ok) {
+        ticket = await res.json();
+      } else {
+        console.warn("Server ticket save failed, using localStorage fallback", await res.text());
+      }
+    } catch (error) {
+      console.warn("Server ticket save failed, using localStorage fallback", error);
+    }
+    const nextTickets = mergeTickets([ticket], tickets);
+    setTickets(nextTickets);
+    saveLocalTickets(nextTickets);
     setActive("tickets");
   });
 
@@ -81,7 +134,7 @@ export default function Workspace({ initialDraws, initialTickets, initialPlan }:
     const res = await fetch("/api/verify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticketId: ticket.id }),
+      body: JSON.stringify({ ticketId: ticket.id, ticket }),
     });
     setCheck(await res.json());
     setActive("review");
@@ -120,7 +173,7 @@ export default function Workspace({ initialDraws, initialTickets, initialPlan }:
         <div><span>计划数</span><b>{kpi.tickets}</b></div>
         <div><span>已记录预算</span><b>{currency(kpi.spent)}</b></div>
         <div><span>已核验</span><b>{kpi.checked}</b></div>
-        <div><span>开奖源</span><b>{kpi.mockDraws} 期 Mock</b></div>
+        <div><span>开奖源</span><b>{kpi.drawSource}</b></div>
       </section>
 
       <nav className="tabs" aria-label="工作台模块">
@@ -249,10 +302,10 @@ export default function Workspace({ initialDraws, initialTickets, initialPlan }:
           <div className="panel">
             <div className="section-heading"><p>Integration</p><h2>API 与定时任务预留</h2></div>
             <div className="flow-list">
-              <div><b>开奖同步</b><span>每日 21:30 后触发 `/api/draws` 同步；真实接口未配置时回退 mock。</span></div>
-              <div><b>中奖核验</b><span>开奖入库后批量调用 `/api/verify`，命中结果进入提醒队列。</span></div>
+              <div><b>开奖同步</b><span>优先读取 Supabase；无服务端数据库时读取官方开奖快照，避免展示假数据。</span></div>
+              <div><b>中奖核验</b><span>开奖数据入库或载入快照后，可调用 `/api/verify` 核对每张计划票。</span></div>
               <div><b>兑奖提醒</b><span>高亮待确认票据，展示“以官方和票面为准”的复核提示。</span></div>
-              <div><b>数据存储</b><span>MVP 本地 JSON；生产建议迁移 Supabase，保持 tickets/draws/plan_runs/settings 表结构。</span></div>
+              <div><b>数据存储</b><span>生产建议配置 Supabase；未配置时计划记录会保存在当前浏览器 localStorage。</span></div>
             </div>
           </div>
           <div className="panel sober">
