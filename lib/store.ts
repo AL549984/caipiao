@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import * as path from "path";
 import { DrawResult, Ticket } from "./types";
 import { mockDraws } from "./mockData";
+import officialDrawsSnapshot from "../data/officialDraws.json";
 import { fetchOfficialDltDraws } from "./officialDltApi";
 import { getSupabaseAdmin, hasSupabaseEnv } from "./supabase";
 import { getSupabasePgPool, hasSupabasePgEnv, pgDrawToValues, pgRowToDraw, pgRowToTicket } from "./supabasePg";
@@ -126,8 +127,10 @@ export async function getDraws(): Promise<DrawResult[]> {
     const liveDraws = await syncOfficialDraws(30);
     if (liveDraws.length) return liveDraws;
   } catch (error) {
-    console.warn("Official DLT API unavailable, falling back to mock data", error);
+    console.warn("Official DLT API unavailable, falling back to official snapshot", error);
   }
+
+  if ((officialDrawsSnapshot as DrawResult[]).length) return officialDrawsSnapshot as DrawResult[];
 
   return mockDraws;
 }
